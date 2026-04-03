@@ -603,12 +603,8 @@ public class XSSFWorkbook extends POIXMLDocument implements Workbook, Date1904Su
         validateSheetIndex(sheetNum);
         XSSFSheet srcSheet = sheets.get(sheetNum);
 
+       // Replaced original lines with a helper method
         newName = checkValidName(newName);
-
-
-
-
-
 
         XSSFSheet clonedSheet = createSheet(newName);
 
@@ -635,7 +631,9 @@ public class XSSFWorkbook extends POIXMLDocument implements Workbook, Date1904Su
                 }
             }
         } catch (InvalidFormatException e) {
-            throw new POIXMLException("Failed to clone sheet InvalidFormatException", e);
+            throw new POIXMLException(String.format(Locale.ROOT,
+                    "Failed to clone sheet '%s' while copying external relationship(s): %s",
+                    srcSheet.getSheetName(), e.getMessage()), e);
         }
 
 
@@ -645,7 +643,9 @@ public class XSSFWorkbook extends POIXMLDocument implements Workbook, Date1904Su
                 clonedSheet.read(bis);
             }
         } catch (IOException e){
-            throw new POIXMLException("Failed to clone sheet POIXMLException", e);
+            throw new POIXMLException(String.format(Locale.ROOT,
+                    "Failed to clone sheet '%s' while reloading the cloned XML: %s",
+                    srcSheet.getSheetName(), e.getMessage()), e);
         }
         CTWorksheet ct = clonedSheet.getCTWorksheet();
         if(ct.isSetLegacyDrawing()) {
