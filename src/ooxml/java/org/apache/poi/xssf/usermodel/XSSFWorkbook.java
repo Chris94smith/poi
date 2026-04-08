@@ -587,99 +587,192 @@ public class XSSFWorkbook extends POIXMLDocument implements Workbook, Date1904Su
         sharedStringSource.close();
     }
 
-    /**
-     * Create an XSSFSheet from an existing sheet in the XSSFWorkbook.
-     *  The cloned sheet is a deep copy of the original but with a new given
-     *  name.
-     *
-     * @param sheetNum The index of the sheet to clone
-     * @param newName The name to set for the newly created sheet
-     * @return XSSFSheet representing the cloned sheet.
-     * @throws IllegalArgumentException if the sheet index or the sheet
-     *         name is invalid
-     * @throws POIXMLException if there were errors when cloning
-     */
-    public XSSFSheet cloneSheet(int sheetNum, String newName) {
-        validateSheetIndex(sheetNum);
-        XSSFSheet srcSheet = sheets.get(sheetNum);
+   /**
+    * Clones a sheet by index with an optional new name.
+    *
+    * @param sheetIndex Index of the sheet to clone
+    * @param newName Optional new name for the cloned sheet
+    * @return Cloned XSSFSheet instance
+    * @throws IllegalArgumentException if index or name is invalid
+    * @throws POIXMLException if cloning fails
+    */
+   public XSSFSheet cloneSheet(int sheetIndex, String newName) {
+       validateSheetIndex(sheetIndex);
+   
+       XSSFSheet sourceSheet = sheets.get(sheetIndex);
+       String targetName = resolveSheetName(sourceSheet, newName);
+   
+       XSSFSheet targetSheet = createSheet(targetName);
+   
+       copySheetRelations(sourceSheet, targetSheet);
+       copyExternalRelationships(sourceSheet, targetSheet);
+       copySheetContent(sourceSheet, targetSheet);
+       sanitizeClonedSheet(targetSheet);
+       cloneDrawingIfExists(sourceSheet, targetSheet);
+   
+       targetSheet.setSelected(false);
+       XSSFSheet.cloneTables(targetSheet);
+   
+       return targetSheet;
+   }
 
-        if (newName == null) {
-            String srcName = srcSheet.getSheetName();
-            newName = getUniqueSheetName(srcName);
-        } else {
-            validateSheetName(newName);
-        }
+   /**
+    * Resolve a valid sheet name.
+    */
+   private String resolveSheetName(XSSFSheet source, String newName) {
+       if (newName == null) {
+           return getUniqueSheetName(source.getSheetName());
+       }
+       validateSheetName(newName);
+       return newName;
+   }
 
-        XSSFSheet clonedSheet = createSheet(newName);
+   /**
+    * Copy internal relations except drawings (handled separately).
+    */
+   private void copySheetRelations(XSSFSheet source, XSSFSheet target) {
+       for (RelationPart relation : source.getRelationParts()) {
+           POIXMLDocumentPart part = relation.getDocumentPart();
+   
+           if (!(part instanceof XSSFDrawing)) {
+               addRelation(relation, target);
+           }
+       }
+   
+       copyHyperlinks(source.getReferenceRelationships(), target);
+   }
 
-        // copy sheet's relations
-        List<RelationPart> rels = srcSheet.getRelationParts();
-        // if the sheet being cloned has a drawing then remember it and re-create it too
-        XSSFDrawing dg = null;
-        for(RelationPart rp : rels) {
-            POIXMLDocumentPart r = rp.getDocumentPart();
-            // do not copy the drawing relationship, it will be re-created
-            if(r instanceof XSSFDrawing) {
-                dg = (XSSFDrawing)r;
-                continue;
-            }
+   /**
+    * Copy external relationships (e.g., linked resources).
+    */
+   private void copyExternalRelationships(XSSFSheet source, XSSFSheet target) {
+       try {
+           for (PackageRelationship rel : source.getPackagePart().getRelationships()) {
+               if (rel.getTargetMode() == TargetMode.EXTERNAL) {
+                   target.getPackagePart().addExternalRelationship(
+                           rel.getTargetURI().toASCIIString(),
+                           rel.getRelationshipType(),
+                           rel.getId()
+                   );
+               }
+           }
+       } catch (InvalidFormatException e) {
+           throw new POIXMLException("Failed to copy external relationships", e);
+       }
+   }
 
-            addRelation(rp, clonedSheet);
-        }
+   /**
+    * Copy raw sheet XML content.
+    */
+   private void copySheetContent(XSSFSheet source, XSSFSheet target) {
+       try (UnsynchronizedByteArrayOutputStream out =
+                    UnsynchronizedByteArrayOutputStream.builder().get()) {
+   
+           source.write(out);
+   
+           try (InputStream in = out.toInputStream()) {
+               target.read(in);
+           }
+   
+       } catch (IOException e) {
+           throw new POIXMLException("Failed to copy sheet content", e);
+       }
+   }
 
-        try {
-            for(PackageRelationship pr : srcSheet.getPackagePart().getRelationships()) {
-                if (pr.getTargetMode() == TargetMode.EXTERNAL) {
-                    clonedSheet.getPackagePart().addExternalRelationship
-                            (pr.getTargetURI().toASCIIString(), pr.getRelationshipType(), pr.getId());
-                }
-            }
-        } catch (InvalidFormatException e) {
-            throw new POIXMLException("Failed to clone sheet", e);
-        }
+   /**
+    * Remove unsupported or problematic elements after cloning.
+    */
+   private void sanitizeClonedSheet(XSSFSheet sheet) {
+       CTWorksheet ct = sheet.getCTWorksheet();
+   
+       if (ct.isSetLegacyDrawing()) {
+           LOG.atWarn().log("Cloning sheets with comments is not supported.");
+           ct.unsetLegacyDrawing();
+       }
+   
+       if (ct.isSetPageSetup()) {
+           LOG.atWarn().log("Cloning sheets with page setup is not supported.");
+           ct.unsetPageSetup();
+       }
+   }
 
+   /**
+    * Clone drawing objects (charts, shapes, etc.).
+    */
+   private void cloneDrawingIfExists(XSSFSheet source, XSSFSheet target) {
+       XSSFDrawing sourceDrawing = findDrawing(source);
+       if (sourceDrawing == null) return;
+   
+       CTWorksheet ct = target.getCTWorksheet();
+       if (ct.isSetDrawing()) {
+           ct.unsetDrawing();
+       }
+   
+       XSSFDrawing targetDrawing = target.createDrawingPatriarch();
+       targetDrawing.getCTDrawing().set(sourceDrawing.getCTDrawing().copy());
+   
+       cloneDrawingRelations(sourceDrawing, targetDrawing, target);
+   }
 
-        try (ByteArrayOutputStream out = new ByteArrayOutputStream()) {
-            srcSheet.write(out);
-            try (ByteArrayInputStream bis = new ByteArrayInputStream(out.toByteArray())) {
-                clonedSheet.read(bis);
-            }
-        } catch (IOException e){
-            throw new POIXMLException("Failed to clone sheet", e);
-        }
-        CTWorksheet ct = clonedSheet.getCTWorksheet();
-        if(ct.isSetLegacyDrawing()) {
-            logger.log(POILogger.WARN, "Cloning sheets with comments is not yet supported.");
-            ct.unsetLegacyDrawing();
-        }
-        if (ct.isSetPageSetup()) {
-            logger.log(POILogger.WARN, "Cloning sheets with page setup is not yet supported.");
-            ct.unsetPageSetup();
-        }
+   /**
+    * Find drawing in source sheet.
+    */
+   private XSSFDrawing findDrawing(XSSFSheet sheet) {
+       for (RelationPart relation : sheet.getRelationParts()) {
+           if (relation.getDocumentPart() instanceof XSSFDrawing) {
+               return (XSSFDrawing) relation.getDocumentPart();
+           }
+       }
+       return null;
+   }
 
-        clonedSheet.setSelected(false);
+   /**
+    * Clone drawing relationships including charts and hyperlinks.
+    */
+   private void cloneDrawingRelations(XSSFDrawing sourceDrawing,
+                                      XSSFDrawing targetDrawing,
+                                      XSSFSheet targetSheet) {
+   
+       for (RelationPart relation : sourceDrawing.getRelationParts()) {
+           POIXMLDocumentPart part = relation.getDocumentPart();
+   
+           if (part instanceof XSSFChart) {
+               cloneChart(targetDrawing, (XSSFChart) part, targetSheet);
+           } else {
+               addRelation(relation, targetDrawing);
+           }
+       }
+   
+       copyHyperlinks(sourceDrawing.getReferenceRelationships(), targetDrawing);
+   }
 
-        // clone the sheet drawing along with its relationships
-        if (dg != null) {
-            if(ct.isSetDrawing()) {
-                // unset the existing reference to the drawing,
-                // so that subsequent call of clonedSheet.createDrawingPatriarch() will create a new one
-                ct.unsetDrawing();
-            }
-            XSSFDrawing clonedDg = clonedSheet.createDrawingPatriarch();
-            // copy drawing contents
-            clonedDg.getCTDrawing().set(dg.getCTDrawing());
+   /**
+    * Clone chart content and fix references.
+    */
+   private void cloneChart(XSSFDrawing targetDrawing,
+                           XSSFChart sourceChart,
+                           XSSFSheet targetSheet) {
+   
+       RelationPart chartPart = targetDrawing.createChartRelationPart();
+       XSSFChart targetChart = chartPart.getDocumentPart();
+   
+       targetChart.importContent(sourceChart);
+       targetChart.replaceReferences(targetSheet);
+   }
 
-            clonedDg = clonedSheet.createDrawingPatriarch();
-
-            // Clone drawing relations
-            List<RelationPart> srcRels = srcSheet.createDrawingPatriarch().getRelationParts();
-            for (RelationPart rp : srcRels) {
-                addRelation(rp, clonedDg);
-            }
-        }
-        return clonedSheet;
-    }
+   /**
+    * Copy hyperlink relationships.
+    */
+   private void copyHyperlinks(List<ReferenceRelationship> refs,
+                               POIXMLDocumentPart target) {
+   
+       for (ReferenceRelationship ref : refs) {
+           if (ref instanceof HyperlinkRelationship) {
+               target.createHyperlink(ref.getUri(), ref.isExternal(), ref.getId());
+           }
+       }
+   }
+   
 
     /**
      * @since 3.14-Beta1
